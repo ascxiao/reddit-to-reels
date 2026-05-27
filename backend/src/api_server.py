@@ -78,6 +78,9 @@ DEFAULT_CONFIG = {
         "threads": 0, "engine": "ffmpeg", "split_duration": 30,
         "outro_text": "Follow for Part {next_part}",
         "branding": "",
+        "music_enabled": False,
+        "music_file": "random",
+        "music_volume": 0.1,
     },
     "output": {"posts_directory": "posts", "used_posts_file": "used_posts.json"},
     "discord": {"enabled": True, "webhook_url": "", "upload_media": True},
@@ -313,6 +316,15 @@ async def health():
 @app.get("/api/config")
 async def get_config():
     return _load_config()
+
+
+@app.get("/api/music/list")
+async def list_music():
+    music_dir = os.path.join(PROJECT_ROOT, "music")
+    if not os.path.exists(music_dir):
+        os.makedirs(music_dir, exist_ok=True)
+    files = [f for f in os.listdir(music_dir) if f.lower().endswith(('.mp3', '.wav', '.m4a', '.aac'))]
+    return {"music_files": files}
 
 
 @app.post("/api/ai/test")
@@ -851,12 +863,34 @@ async def resume_video_from_audio(req: dict = {}):
         raise HTTPException(404, "No audio files found in audio directory")
 
     timeline = []
+    has_credits = False
     for af in audio_files:
+        is_credits = 'credits' in af.lower() or 'silence' in af.lower()
+        if is_credits:
+            has_credits = True
         timeline.append({
-            "text": "",  # Text not needed for video, just audio
+            "text": f"Posted by u/{summary.get('author', 'Anonymous')}" if is_credits else "",
             "audio_path": os.path.join(audio_dir, af),
             "author": summary.get("author", "Anonymous"),
+            "is_credits": is_credits
         })
+
+    if not has_credits:
+        # Generate credits segment on the fly
+        try:
+            credits_audio = os.path.join(audio_dir, "credits_silence.wav")
+            from tts_engine import TTSManager
+            tts_m = TTSManager()
+            tts_m._generate_silence(2, credits_audio)
+            timeline.append({
+                "text": f"Posted by u/{summary.get('author', 'Anonymous')}",
+                "audio_path": credits_audio,
+                "author": summary.get("author", "Anonymous"),
+                "is_credits": True
+            })
+            _log("Appended credits segment to resumed timeline")
+        except Exception as e:
+            _log(f"Warning: Could not generate resume credits silence: {e}")
 
     # Try to load formatted text to populate segment texts
     for mode_file in ["story_mode.txt", "qa_mode.txt"]:
@@ -865,6 +899,8 @@ async def resume_video_from_audio(req: dict = {}):
             with open(txt_path, "r", encoding="utf-8") as f:
                 lines = [l.strip() for l in f.readlines() if l.strip()]
             for i, seg in enumerate(timeline):
+                if seg.get("is_credits"):
+                    continue
                 if i < len(lines):
                     seg["text"] = lines[i]
             break
@@ -910,6 +946,9 @@ async def _resume_video_async(post_id: str, title: str, timeline: list):
         engine = video_config.get("engine", "moviepy")
         threads = video_config.get("threads", 0)
         branding = video_config.get("branding", "")
+        music_enabled = video_config.get("music_enabled", False)
+        music_file = video_config.get("music_file", "random") if music_enabled else None
+        music_volume = video_config.get("music_volume", 0.1)
 
         # ── Video Step ──────────────────────────────────────────────
         _set_step("video", "running", "Rendering video from existing audio...")
@@ -951,6 +990,29 @@ async def _resume_video_async(post_id: str, title: str, timeline: list):
             ]
             _set_step("video", "running", f"Rendering {len(parts)} parts · engine: {engine}", video_sub_steps)
 
+            # Pre-generate thumbnails for parts in resume video step
+            try:
+                summary_path = os.path.join(output_base, "summary.json")
+                p_sub = ""
+                p_score = 0
+                if os.path.exists(summary_path):
+                    with open(summary_path, "r", encoding="utf-8") as sf:
+                        s_data = json.load(sf)
+                        p_sub = s_data.get("subreddit", "")
+                        p_score = s_data.get("score", 0)
+                
+                num_thumbs = len(parts)
+                for t_idx in range(1, num_thumbs + 1):
+                    thumb_path = os.path.join(output_base, f"thumbnail_part{t_idx}.png")
+                    await asyncio.to_thread(
+                        video_gen.generate_thumbnail,
+                        title, p_sub, t_idx, num_thumbs, thumb_path, p_score, branding,
+                        None
+                    )
+                _log(f"Pre-generated {num_thumbs} part thumbnails (resumed)")
+            except Exception as e:
+                _log(f"Warning: Pre-generating thumbnails failed: {e}")
+
             for idx, part_segs in enumerate(parts, start=1):
                 video_sub_steps[idx - 1]["status"] = "running"
                 _set_step("video", "running", f"Rendering part {idx}/{len(parts)}...", video_sub_steps)
@@ -959,9 +1021,9 @@ async def _resume_video_async(post_id: str, title: str, timeline: list):
                 tail_text = outro_text_template.replace("{next_part}", str(idx + 1)) if idx < len(parts) else None
 
                 if engine == "ffmpeg":
-                    vp = await asyncio.to_thread(video_gen.generate_video_ffmpeg, part_segs, part_out, tail_text, tail_dur, branding)
+                    vp = await asyncio.to_thread(video_gen.generate_video_ffmpeg, part_segs, part_out, tail_text, tail_dur, branding, music_file, music_volume)
                 else:
-                    vp = await asyncio.to_thread(video_gen.generate_video, part_segs, part_out, tail_text, tail_dur, branding)
+                    vp = await asyncio.to_thread(video_gen.generate_video, part_segs, part_out, tail_text, tail_dur, branding, music_file, music_volume)
 
                 if vp:
                     generated_video_paths.append(vp)
@@ -971,12 +1033,34 @@ async def _resume_video_async(post_id: str, title: str, timeline: list):
                 _set_step("video", "running", f"Rendering part {idx}/{len(parts)}...", video_sub_steps)
         else:
             output_video = os.path.join(output_base, "video.mp4")
+            
+            # Pre-generate thumbnail for single video in resume video step
+            try:
+                summary_path = os.path.join(output_base, "summary.json")
+                p_sub = ""
+                p_score = 0
+                if os.path.exists(summary_path):
+                    with open(summary_path, "r", encoding="utf-8") as sf:
+                        s_data = json.load(sf)
+                        p_sub = s_data.get("subreddit", "")
+                        p_score = s_data.get("score", 0)
+                        
+                thumb_path = os.path.join(output_base, "thumbnail.png")
+                await asyncio.to_thread(
+                    video_gen.generate_thumbnail,
+                    title, p_sub, 1, 1, thumb_path, p_score, branding,
+                    None
+                )
+                _log("Pre-generated single thumbnail (resumed)")
+            except Exception as e:
+                _log(f"Warning: Pre-generating thumbnail failed: {e}")
+
             video_sub_steps = [{"label": "Full video", "status": "running", "detail": f"{engine} engine"}]
             _set_step("video", "running", f"Rendering single video · engine: {engine}", video_sub_steps)
             if engine == "ffmpeg":
-                vp = await asyncio.to_thread(video_gen.generate_video_ffmpeg, timeline, output_video, None, 0.0, branding)
+                vp = await asyncio.to_thread(video_gen.generate_video_ffmpeg, timeline, output_video, None, 0.0, branding, music_file, music_volume)
             else:
-                vp = await asyncio.to_thread(video_gen.generate_video, timeline, output_video, None, 0.0, branding)
+                vp = await asyncio.to_thread(video_gen.generate_video, timeline, output_video, None, 0.0, branding, music_file, music_volume)
             if vp:
                 generated_video_paths.append(vp)
                 video_sub_steps[0]["status"] = "done"
@@ -1050,6 +1134,9 @@ async def _resume_video_async(post_id: str, title: str, timeline: list):
         stats["total_render_time_s"] += elapsed
 
         total_size = sum(os.path.getsize(p) for p in generated_video_paths if os.path.exists(p))
+        # Upsert: remove old entry for same post_id before inserting fresh one
+        global videos_db
+        videos_db = [v for v in videos_db if v["id"] != post_id]
         videos_db.insert(0, {
             "id": post_id,
             "title": title, "subreddit": pipeline_state["current_post"].get("subreddit", ""),
@@ -1390,10 +1477,27 @@ async def _run_pipeline_async(specific_post_id: Optional[str] = None, selected_c
                             hook_seg = hook_seg_list
 
                     if hook_seg:
+                        for s in hook_seg:
+                            s["is_title"] = True
                         timeline = hook_seg + timeline
                         _log(f"Hook prepended ({len(hook_seg)} segments)")
 
                 if timeline:
+                    # Append silent credits segment
+                    try:
+                        credits_audio = os.path.join(PROJECT_ROOT, "posts", post_id, "audio", "credits_silence.wav")
+                        os.makedirs(os.path.dirname(credits_audio), exist_ok=True)
+                        tts_manager._generate_silence(2, credits_audio)
+                        timeline.append({
+                            "text": f"Posted by u/{author}",
+                            "audio_path": credits_audio,
+                            "author": author,
+                            "is_credits": True
+                        })
+                        _log("Appended credits segment")
+                    except Exception as e:
+                        _log(f"Warning: Could not generate credits segment: {e}")
+
                     for ss in tts_sub_steps_live:
                         ss["status"] = "done"
                     _set_step("tts", "done", f"Generated {len(timeline)} audio segments", tts_sub_steps_live)
@@ -1423,6 +1527,9 @@ async def _run_pipeline_async(specific_post_id: Optional[str] = None, selected_c
         engine = video_config.get("engine", "moviepy")
         threads = video_config.get("threads", 0)
         auto_cleanup = video_config.get("auto_cleanup", False)
+        music_enabled = video_config.get("music_enabled", False)
+        music_file = video_config.get("music_file", "random") if music_enabled else None
+        music_volume = video_config.get("music_volume", 0.1)
 
         generated_video_paths = []
 
@@ -1471,6 +1578,25 @@ async def _run_pipeline_async(specific_post_id: Optional[str] = None, selected_c
 
                     branding = config.get("video", {}).get("branding", "")
 
+                    # Pre-generate thumbnails beforehand so they are ready to be used as title slide
+                    try:
+                        p_title = pipeline_state.get("current_post", {}).get("title", title) if pipeline_state.get("current_post") else title
+                        p_sub = pipeline_state.get("current_post", {}).get("subreddit", "") if pipeline_state.get("current_post") else ""
+                        p_score = pipeline_state.get("current_post", {}).get("score", 0) if pipeline_state.get("current_post") else 0
+                        thumb_title_override = gemini_thumbnail_text if gemini_thumbnail_text else None
+                        
+                        num_thumbs = len(parts)
+                        for t_idx in range(1, num_thumbs + 1):
+                            thumb_path = os.path.join(output_base, f"thumbnail_part{t_idx}.png")
+                            await asyncio.to_thread(
+                                video_gen.generate_thumbnail,
+                                p_title, p_sub, t_idx, num_thumbs, thumb_path, p_score, branding,
+                                thumb_title_override
+                            )
+                        _log(f"Pre-generated {num_thumbs} part thumbnails")
+                    except Exception as e:
+                        _log(f"Warning: Pre-generating thumbnails failed: {e}")
+
                     for idx, part_segs in enumerate(parts, start=1):
                         video_sub_steps[idx - 1]["status"] = "running"
                         _set_step("video", "running", f"Rendering part {idx}/{len(parts)}...", video_sub_steps)
@@ -1482,9 +1608,9 @@ async def _run_pipeline_async(specific_post_id: Optional[str] = None, selected_c
                             tail_text = outro_text_template.replace("{next_part}", str(idx + 1))
 
                         if engine == "ffmpeg":
-                            vp = await asyncio.to_thread(video_gen.generate_video_ffmpeg, part_segs, part_out, tail_text, tail_dur, branding)
+                            vp = await asyncio.to_thread(video_gen.generate_video_ffmpeg, part_segs, part_out, tail_text, tail_dur, branding, music_file, music_volume)
                         else:
-                            vp = await asyncio.to_thread(video_gen.generate_video, part_segs, part_out, tail_text, tail_dur, branding)
+                            vp = await asyncio.to_thread(video_gen.generate_video, part_segs, part_out, tail_text, tail_dur, branding, music_file, music_volume)
 
                         if vp:
                             generated_video_paths.append(vp)
@@ -1496,13 +1622,31 @@ async def _run_pipeline_async(specific_post_id: Optional[str] = None, selected_c
                     # Single video output
                     branding = config.get("video", {}).get("branding", "")
                     output_video = os.path.join(output_base, "video.mp4")
+                    
+                    # Pre-generate thumbnail for single video
+                    try:
+                        p_title = pipeline_state.get("current_post", {}).get("title", title) if pipeline_state.get("current_post") else title
+                        p_sub = pipeline_state.get("current_post", {}).get("subreddit", "") if pipeline_state.get("current_post") else ""
+                        p_score = pipeline_state.get("current_post", {}).get("score", 0) if pipeline_state.get("current_post") else 0
+                        thumb_title_override = gemini_thumbnail_text if gemini_thumbnail_text else None
+                        thumb_path = os.path.join(output_base, "thumbnail.png")
+                        
+                        await asyncio.to_thread(
+                            video_gen.generate_thumbnail,
+                            p_title, p_sub, 1, 1, thumb_path, p_score, branding,
+                            thumb_title_override
+                        )
+                        _log("Pre-generated single thumbnail")
+                    except Exception as e:
+                        _log(f"Warning: Pre-generating thumbnail failed: {e}")
+                        
                     video_sub_steps = [{"label": "Full video", "status": "running", "detail": f"{engine} engine · {len(timeline)} segments"}]
                     _set_step("video", "running", f"Rendering single video · engine: {engine}", video_sub_steps)
                     _log(f"Rendering single video ({engine} engine)...")
                     if engine == "ffmpeg":
-                        vp = await asyncio.to_thread(video_gen.generate_video_ffmpeg, timeline, output_video, None, 0.0, branding)
+                        vp = await asyncio.to_thread(video_gen.generate_video_ffmpeg, timeline, output_video, None, 0.0, branding, music_file, music_volume)
                     else:
-                        vp = await asyncio.to_thread(video_gen.generate_video, timeline, output_video, None, 0.0, branding)
+                        vp = await asyncio.to_thread(video_gen.generate_video, timeline, output_video, None, 0.0, branding, music_file, music_volume)
                     if vp:
                         generated_video_paths.append(vp)
                         video_sub_steps[0]["status"] = "done"
@@ -1672,6 +1816,9 @@ async def _run_pipeline_async(specific_post_id: Optional[str] = None, selected_c
 
         # Use actual generated paths (not _get_video_file_info which can't find moved files)
         total_size = sum(os.path.getsize(p) for p in generated_video_paths if os.path.exists(p))
+        # Upsert: remove old entry for same post_id before inserting fresh one
+        global videos_db
+        videos_db = [v for v in videos_db if v["id"] != post_id]
         videos_db.insert(0, {
             "id": post_id,
             "title": title or post_id,
@@ -1765,20 +1912,86 @@ def _generate_local_tts_narrative(tts_instance, post_id, title, body, author, co
 
 @app.get("/api/videos")
 async def list_videos():
-    safe = []
-    for v in videos_db:
-        entry = {k: val for k, val in v.items() if k != "video_paths"}
-        # Add a list of part filenames so the frontend knows what's available
-        paths = v.get("video_paths", [])
-        entry["part_files"] = [os.path.basename(p) for p in paths if os.path.exists(p)]
-        # Check for thumbnails alongside video files
-        entry["has_thumbnails"] = False
-        if paths:
-            first_dir = os.path.dirname(paths[0]) if paths[0] else None
-            if first_dir and os.path.isdir(first_dir):
-                entry["has_thumbnails"] = any(f.endswith(".png") and "thumbnail" in f for f in os.listdir(first_dir))
-        safe.append(entry)
-    return {"videos": safe}
+    """Always re-scan disk so the list is fresh after every generation."""
+    fresh: List[Dict] = []
+    posts_dir = os.path.join(PROJECT_ROOT, "posts")
+    videos_dir = os.path.join(PROJECT_ROOT, "videos")
+
+    if os.path.isdir(posts_dir):
+        for post_id in os.listdir(posts_dir):
+            post_dir = os.path.join(posts_dir, post_id)
+            if not os.path.isdir(post_dir):
+                continue
+            summary_path = os.path.join(post_dir, "summary.json")
+            if not os.path.exists(summary_path):
+                continue
+            with open(summary_path, "r", encoding="utf-8") as f:
+                summary = json.load(f)
+
+            has_audio = os.path.isdir(os.path.join(post_dir, "audio"))
+            thumbs = [ft for ft in os.listdir(post_dir) if ft.endswith(".png") and "thumbnail" in ft]
+
+            # Merge mp4s from posts/ dir AND in-memory video_paths (videos/ dir)
+            mem_entry = next((v for v in videos_db if v["id"] == post_id), None)
+            video_paths_set = set()
+
+            # From posts/ dir
+            for fp in os.listdir(post_dir):
+                if fp.endswith(".mp4"):
+                    video_paths_set.add(os.path.join(post_dir, fp))
+
+            # From in-memory (videos/ dir renders)
+            if mem_entry and mem_entry.get("video_paths"):
+                for p in mem_entry["video_paths"]:
+                    if os.path.exists(p):
+                        video_paths_set.add(p)
+
+            # Also scan videos/ dir for files matching this post_id
+            if os.path.isdir(videos_dir):
+                for item in os.listdir(videos_dir):
+                    item_path = os.path.join(videos_dir, item)
+                    if os.path.isdir(item_path) and post_id in item:
+                        for fp in os.listdir(item_path):
+                            if fp.endswith(".mp4"):
+                                video_paths_set.add(os.path.join(item_path, fp))
+                    elif item.endswith(".mp4") and post_id in item:
+                        video_paths_set.add(item_path)
+
+            # Sort by mtime descending so newest is first
+            video_paths = sorted(
+                video_paths_set,
+                key=lambda p: os.path.getmtime(p) if os.path.exists(p) else 0,
+                reverse=True
+            )
+            has_video = bool(video_paths)
+            total_size = sum(os.path.getsize(p) for p in video_paths)
+
+            # created_at: prefer mem_entry (pipeline timestamp), then file mtime, then summary
+            created_at = summary.get("downloaded_at", "")
+            if video_paths:
+                mtime_ts = max(os.path.getmtime(p) for p in video_paths if os.path.exists(p))
+                created_at = datetime.fromtimestamp(mtime_ts, tz=timezone.utc).isoformat()
+            if mem_entry and mem_entry.get("created_at"):
+                created_at = mem_entry["created_at"]
+            fresh.append({
+                "id": post_id,
+                "title": summary.get("title", "Untitled"),
+                "subreddit": summary.get("subreddit", "unknown"),
+                "score": summary.get("score", 0),
+                "num_comments": summary.get("num_comments", 0),
+                "status": "published" if has_video else ("audio_only" if has_audio else "fetched"),
+                "created_at": mem_entry.get("created_at", created_at) if mem_entry else created_at,
+                "has_video": has_video,
+                "has_audio": has_audio,
+                "render_time_s": mem_entry.get("render_time_s") if mem_entry else None,
+                "parts": len(video_paths) if len(video_paths) > 1 else None,
+                "file_size_bytes": total_size or None,
+                "part_files": [os.path.basename(p) for p in video_paths],
+                "has_thumbnails": bool(thumbs),
+            })
+    # Sort newest first by created_at
+    fresh.sort(key=lambda v: v.get("created_at") or "", reverse=True)
+    return {"videos": fresh}
 
 
 def _find_thumbnail_files(video_id: str) -> List[str]:
@@ -1814,7 +2027,11 @@ async def get_thumbnail(video_id: str, part: int = 0):
         raise HTTPException(404, "No thumbnails found")
     if part < 0 or part >= len(thumbs):
         raise HTTPException(404, f"Thumbnail part {part} not found. Available: 0-{len(thumbs)-1}")
-    return FileResponse(thumbs[part], media_type="image/png")
+    from fastapi.responses import Response
+    return FileResponse(
+        thumbs[part], media_type="image/png",
+        headers={"Cache-Control": "no-store, no-cache, must-revalidate", "Pragma": "no-cache"}
+    )
 
 
 def _find_video_entry(video_id: str):
@@ -1825,31 +2042,37 @@ def _find_video_entry(video_id: str):
 
 
 def _find_all_video_files(video_id: str) -> List[str]:
-    """Return all mp4 paths for a video, sorted by name."""
+    """Return all mp4 paths for a video, sorted by modification time (newest first)."""
     paths = set()
+
+    # Primary: scan the post's own directory directly from disk
+    post_dir = os.path.join(PROJECT_ROOT, "posts", video_id)
+    if os.path.isdir(post_dir):
+        for f in os.listdir(post_dir):
+            if f.endswith(".mp4"):
+                paths.add(os.path.join(post_dir, f))
+
+    # Secondary: in-memory video_paths (for videos/ dir or moved files)
     entry = _find_video_entry(video_id)
     if entry and entry.get("video_paths"):
         for p in entry["video_paths"]:
             if os.path.exists(p):
                 paths.add(p)
 
-    # Fallback: search posts and videos dirs
-    search_dirs = [os.path.join(PROJECT_ROOT, "posts", video_id)]
+    # Tertiary: scan videos/ dir
     videos_dir = os.path.join(PROJECT_ROOT, "videos")
     if os.path.isdir(videos_dir):
-        search_dirs.append(videos_dir)
         for sub in os.listdir(videos_dir):
             sub_path = os.path.join(videos_dir, sub)
             if os.path.isdir(sub_path) and video_id in sub:
-                search_dirs.append(sub_path)
+                for f in os.listdir(sub_path):
+                    if f.endswith(".mp4"):
+                        paths.add(os.path.join(sub_path, f))
+            elif sub.endswith(".mp4") and video_id in sub:
+                paths.add(os.path.join(videos_dir, sub))
 
-    for d in search_dirs:
-        if os.path.isdir(d):
-            for f in sorted(os.listdir(d)):
-                if f.endswith(".mp4"):
-                    paths.add(os.path.join(d, f))
-
-    return sorted(paths)
+    # Sort by mtime DESCENDING — newest file first, so part=0 always gets the latest render
+    return sorted(paths, key=lambda p: os.path.getmtime(p) if os.path.exists(p) else 0, reverse=True)
 
 
 @app.get("/api/videos/{video_id}/stream")
@@ -1860,7 +2083,10 @@ async def stream_video(video_id: str, part: int = 0):
         raise HTTPException(404, "Video file not found")
     if part < 0 or part >= len(all_files):
         raise HTTPException(404, f"Part {part} not found. Available: 0-{len(all_files)-1}")
-    return FileResponse(all_files[part], media_type="video/mp4")
+    return FileResponse(
+        all_files[part], media_type="video/mp4",
+        headers={"Cache-Control": "no-store, no-cache, must-revalidate", "Pragma": "no-cache"}
+    )
 
 
 @app.get("/api/videos/{video_id}/download")

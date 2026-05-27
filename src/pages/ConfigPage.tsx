@@ -14,7 +14,7 @@ import { Badge } from "@/components/ui/badge";
 import { Slider } from "@/components/ui/slider";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Separator } from "@/components/ui/separator";
-import { useConfig, useUpdateConfig, useTtsProviders, useInstallTtsProvider } from "@/hooks/use-api";
+import { useConfig, useUpdateConfig, useTtsProviders, useInstallTtsProvider, useMusicList } from "@/hooks/use-api";
 import { useToast } from "@/hooks/use-toast";
 import { api } from "@/lib/api";
 import type { FullConfig, TtsProvider } from "@/lib/api";
@@ -90,8 +90,10 @@ export default function ConfigPage() {
   const updateMutation = useUpdateConfig();
   const { data: providersData, isLoading: providersLoading } = useTtsProviders();
   const installMutation = useInstallTtsProvider();
+  const { data: musicData } = useMusicList();
   const { toast } = useToast();
   const providers = providersData?.providers ?? [];
+  const musicFiles = musicData?.music_files ?? [];
 
   // Local state for all config sections
   const [subreddits, setSubreddits] = useState<string[]>([]);
@@ -131,6 +133,9 @@ export default function ConfigPage() {
   const [splitDuration, setSplitDuration] = useState(30);
   const [outroText, setOutroText] = useState("Follow for Part {next_part}");
   const [branding, setBranding] = useState("");
+  const [musicEnabled, setMusicEnabled] = useState(false);
+  const [musicFile, setMusicFile] = useState("random");
+  const [musicVolume, setMusicVolume] = useState(0.1);
 
   // Output
   const [postsDir, setPostsDir] = useState("posts");
@@ -215,6 +220,9 @@ export default function ConfigPage() {
     setSplitDuration(v.split_duration ?? 30);
     setOutroText(v.outro_text ?? "Follow for Part {next_part}");
     setBranding(v.branding ?? "");
+    setMusicEnabled((v as any).music_enabled ?? false);
+    setMusicFile((v as any).music_file ?? "random");
+    setMusicVolume((v as any).music_volume ?? 0.1);
 
     const o = c.output ?? {} as FullConfig["output"];
     setPostsDir(o.posts_directory ?? "posts");
@@ -304,6 +312,9 @@ export default function ConfigPage() {
           split_duration: splitDuration,
           outro_text: outroText,
           branding,
+          music_enabled: musicEnabled,
+          music_file: musicFile,
+          music_volume: musicVolume,
         },
         output: {
           posts_directory: postsDir,
@@ -795,6 +806,59 @@ export default function ConfigPage() {
             <Label className="text-xs text-muted-foreground">Branding Watermark</Label>
             <Input value={branding} onChange={(e) => setBranding(e.target.value)} placeholder="e.g. @yourhandle or YourChannel" className="h-8 text-xs bg-secondary border-border" />
             <p className="text-[10px] text-muted-foreground">Shown on thumbnails to prevent uncredited copying. Leave blank to disable.</p>
+          </div>
+          <Separator />
+          
+          {/* Background Music settings */}
+          <div className="space-y-3 pt-1">
+            <div className="flex items-center justify-between">
+              <div>
+                <Label className="text-xs font-semibold">Background Music</Label>
+                <p className="text-[10px] text-muted-foreground mt-0.5">Mix background music in a low volume</p>
+              </div>
+              <Switch checked={musicEnabled} onCheckedChange={setMusicEnabled} />
+            </div>
+
+            {musicEnabled && (
+              <div className="space-y-3 pl-3 border-l-2 border-primary/20 ml-1">
+                <div className="space-y-1">
+                  <Label className="text-xs text-muted-foreground">Music Track</Label>
+                  <Select value={musicFile} onValueChange={setMusicFile}>
+                    <SelectTrigger className="h-8 text-xs bg-secondary border-border">
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="none">None</SelectItem>
+                      <SelectItem value="random">Random Song</SelectItem>
+                      {musicFiles.map((f) => (
+                        <SelectItem key={f} value={f}>{f}</SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                  <p className="text-[10px] text-muted-foreground">
+                    Tracks discovered inside <code className="font-mono bg-secondary/80 px-1 py-0.5 rounded">music/</code> directory.
+                  </p>
+                </div>
+
+                <div className="space-y-2">
+                  <div className="flex justify-between text-xs">
+                    <span>Music Volume</span>
+                    <span className="font-mono text-primary">{Math.round(musicVolume * 100)}%</span>
+                  </div>
+                  <Slider
+                    value={[musicVolume]}
+                    onValueChange={([v]) => setMusicVolume(v)}
+                    min={0.01}
+                    max={0.3}
+                    step={0.01}
+                    className="[&_[role=slider]]:bg-primary"
+                  />
+                  <p className="text-[10px] text-muted-foreground">
+                    Recommended volume level is between 3% and 10% to prevent drowning out voice narrations.
+                  </p>
+                </div>
+              </div>
+            )}
           </div>
         </Section>
 

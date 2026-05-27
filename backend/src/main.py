@@ -171,7 +171,24 @@ def run_pipeline(mode: Optional[str] = None, target_post_id: Optional[str] = Non
             if hook_segs:
                 for s in hook_segs:
                     s["author"] = author
+                    s["is_title"] = True
                 timeline = hook_segs + timeline
+
+        # Append silent credits segment
+        if timeline:
+            try:
+                credits_audio = os.path.join(PROJECT_ROOT, "posts", post_id, "audio", "credits_silence.wav")
+                os.makedirs(os.path.dirname(credits_audio), exist_ok=True)
+                tts_manager._generate_silence(2, credits_audio)
+                timeline.append({
+                    "text": f"Posted by u/{author}",
+                    "audio_path": credits_audio,
+                    "author": author,
+                    "is_credits": True
+                })
+                print("✓ Appended credits segment to timeline")
+            except Exception as e:
+                print(f"⚠️ Warning: Could not generate credits segment: {e}")
         
         if not timeline:
             print("❌ Failed to generate audio timeline.")
@@ -184,6 +201,10 @@ def run_pipeline(mode: Optional[str] = None, target_post_id: Optional[str] = Non
         auto_cleanup = video_config.get('auto_cleanup', False)
         threads = video_config.get('threads', 0)
         engine = video_config.get('engine', 'moviepy')
+        branding = video_config.get('branding', '')
+        music_enabled = video_config.get('music_enabled', False)
+        music_file = video_config.get('music_file', 'random') if music_enabled else None
+        music_volume = video_config.get('music_volume', 0.1)
             
         try:
             video_gen = VideoGenerator(mode=video_mode, use_gpu=use_gpu, threads=threads)
@@ -223,15 +244,34 @@ def run_pipeline(mode: Optional[str] = None, target_post_id: Optional[str] = Non
                 if current:
                     parts.append(current)
                 generated_paths = []
+                
+                # Pre-generate thumbnails for parts beforehand so they are ready to be used as title slide
+                try:
+                    p_title = title
+                    p_sub = formatter.summary.get('subreddit', 'AskReddit')
+                    p_score = formatter.summary.get('score', 0)
+                    thumb_title_override = gemini_thumbnail_text if gemini_thumbnail_text else None
+                    
+                    num_thumbs = len(parts)
+                    for t_idx in range(1, num_thumbs + 1):
+                        thumb_path = os.path.join(output_base, f"thumbnail_part{t_idx}.png")
+                        video_gen.generate_thumbnail(
+                            p_title, p_sub, t_idx, num_thumbs, thumb_path, p_score, branding,
+                            thumb_title_override
+                        )
+                    print(f"✓ Pre-generated {num_thumbs} part thumbnails")
+                except Exception as e:
+                    print(f"⚠️ Pre-generating thumbnails failed: {e}")
+                    
                 for idx, part_segs in enumerate(parts, start=1):
                     part_out = os.path.join(output_base, f"video_part{idx}.mp4")
                     tail_text = None
                     if idx < len(parts):
                         tail_text = outro_text_template.replace("{next_part}", str(idx+1))
                     if engine == 'ffmpeg':
-                        vp = video_gen.generate_video_ffmpeg(part_segs, part_out, tail_text=tail_text, tail_duration=tail_dur)
+                        vp = video_gen.generate_video_ffmpeg(part_segs, part_out, tail_text=tail_text, tail_duration=tail_dur, branding=branding, music_file=music_file, music_volume=music_volume)
                     else:
-                        vp = video_gen.generate_video(part_segs, part_out, tail_text=tail_text, tail_duration=tail_dur)
+                        vp = video_gen.generate_video(part_segs, part_out, tail_text=tail_text, tail_duration=tail_dur, branding=branding, music_file=music_file, music_volume=music_volume)
                     if vp:
                         generated_paths.append(vp)
                 if not generated_paths:
@@ -341,10 +381,26 @@ def run_pipeline(mode: Optional[str] = None, target_post_id: Optional[str] = Non
 
             else:
                 output_video = os.path.join(output_base, "video.mp4")
+                
+                # Pre-generate thumbnail for single video beforehand so it is ready to be used as title slide
+                try:
+                    p_title = title
+                    p_sub = formatter.summary.get('subreddit', 'AskReddit')
+                    p_score = formatter.summary.get('score', 0)
+                    thumb_title_override = gemini_thumbnail_text if gemini_thumbnail_text else None
+                    thumb_path = os.path.join(output_base, "thumbnail.png")
+                    video_gen.generate_thumbnail(
+                        p_title, p_sub, 1, 1, thumb_path, p_score, branding,
+                        thumb_title_override
+                    )
+                    print("✓ Pre-generated single thumbnail")
+                except Exception as e:
+                    print(f"⚠️ Pre-generating thumbnail failed: {e}")
+                    
                 if engine == 'ffmpeg':
-                    video_path = video_gen.generate_video_ffmpeg(timeline, output_video)
+                    video_path = video_gen.generate_video_ffmpeg(timeline, output_video, branding=branding, music_file=music_file, music_volume=music_volume)
                 else:
-                    video_path = video_gen.generate_video(timeline, output_video)
+                    video_path = video_gen.generate_video(timeline, output_video, branding=branding, music_file=music_file, music_volume=music_volume)
                 if video_path:
                     print(f"\n✅ PIPELINE COMPLETE!")
                 if video_path:

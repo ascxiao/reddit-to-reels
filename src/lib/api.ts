@@ -161,6 +161,9 @@ export interface FullConfig {
     split_duration: number;
     outro_text: string;
     branding: string;
+    music_enabled?: boolean;
+    music_file?: string;
+    music_volume?: number;
   };
   output: {
     posts_directory: string;
@@ -187,6 +190,9 @@ export const api = {
       method: "PUT",
       body: JSON.stringify(update),
     }),
+
+  // Music list
+  getMusicList: () => request<{ music_files: string[] }>("/api/music/list"),
 
   // Posts
   discoverPosts: (sort: string = "hot") =>

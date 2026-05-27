@@ -62,7 +62,7 @@ function VideoCard({ video, index, onPreview, onDelete }: {
         <div className="relative h-36 bg-secondary flex items-center justify-center overflow-hidden">
           {video.has_thumbnails ? (
             <img
-              src={`${API_BASE}/api/videos/${video.id}/thumbnail?part=0`}
+              src={`${API_BASE}/api/videos/${video.id}/thumbnail?part=0&_t=${video.created_at ?? Date.now()}`}
               alt={video.title}
               className="absolute inset-0 w-full h-full object-cover"
               onError={(e) => { e.currentTarget.style.display = 'none'; }}
@@ -255,7 +255,7 @@ export default function VideosPage() {
                 key={`${preview.video.id}-${preview.part}`}
                 controls autoPlay
                 className="w-full rounded-lg bg-secondary max-h-[50vh]"
-                src={`${API_BASE}/api/videos/${preview.video.id}/stream?part=${preview.part}`}
+                src={`${API_BASE}/api/videos/${preview.video.id}/stream?part=${preview.part}&_t=${preview.video.created_at ?? Date.now()}`}
               />
               <div className="flex flex-wrap items-center gap-2">
                 {(preview.video.part_files?.length ?? 0) > 1 && (

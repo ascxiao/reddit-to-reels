@@ -693,6 +693,24 @@ class TTSManager:
         self.main_voice = self.tts_config.get('main_voice', 'Brian')
         self.use_multiple_voices = self.tts_config.get('use_multiple_voices', True)
         self.comment_voices = self.tts_config.get('comment_voices', ['Brian'])
+        
+    def _generate_silence(self, duration_seconds: int, output_path: str) -> str:
+        """Generate a silent audio file of specified duration."""
+        import struct
+        import wave
+
+        # Generate silent WAV then convert path (consumers handle mp3/wav)
+        wav_path = output_path.replace('.mp3', '.wav') if output_path.endswith('.mp3') else output_path
+        sample_rate = 22050
+        num_samples = sample_rate * duration_seconds
+        
+        with wave.open(wav_path, 'w') as wf:
+            wf.setnchannels(1)
+            wf.setsampwidth(2)
+            wf.setframerate(sample_rate)
+            wf.writeframes(struct.pack('<' + 'h' * num_samples, *([0] * num_samples)))
+        
+        return wav_path
     
     def _load_config(self, config_path: str) -> dict:
         """Load configuration from JSON file."""
@@ -847,6 +865,7 @@ class TTSManager:
         title_segments = tts.generate_segments(post_title, progress_callback=_make_seg_progress("Title"), cancel_check=cancel_check)
         for seg in title_segments:
             seg['author'] = post_author
+            seg['is_title'] = True
             full_timeline.append(seg)
             
         # 2. Post Body

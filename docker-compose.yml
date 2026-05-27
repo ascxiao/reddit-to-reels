@@ -9,11 +9,13 @@ services:
     ports:
       - "8000:8000"
     volumes:
-      - ./posts:/app/posts
-      - ./videos:/app/videos
-      - ./backgrounds:/app/backgrounds
-      - ./audio:/app/audio
-      - ./config.json:/app/config.json
-      - ./channels.json:/app/channels.json
+      - ./posts:/app/backend/posts
+      - ./videos:/app/backend/videos
+      - ./backgrounds:/app/backend/backgrounds
+      - ./audio:/app/backend/audio
+      - ./music:/app/backend/music
+      - ./backend/config.json:/app/backend/config.json
+      - ./backend/channels.json:/app/backend/channels.json
+      - ./backend/src:/app/backend/src
     environment:
       - PYTHONUNBUFFERED=1

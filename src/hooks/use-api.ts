@@ -52,6 +52,7 @@ export function useVideos() {
     queryKey: ["videos"],
     queryFn: api.getVideos,
     refetchInterval: 10_000,
+    staleTime: 0, // Always re-fetch from server; disk state changes after generation
   });
 }
 
@@ -82,6 +83,7 @@ export function useRunPipeline() {
       api.runPipeline(params),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ["pipeline"] });
+      qc.invalidateQueries({ queryKey: ["videos"] }); // immediate refresh
       setTimeout(() => {
         qc.invalidateQueries({ queryKey: ["videos"] });
         qc.invalidateQueries({ queryKey: ["stats"] });
@@ -120,6 +122,7 @@ export function useResumeVideo() {
     mutationFn: (post_id: string) => api.resumeVideo(post_id),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ["pipeline"] });
+      qc.invalidateQueries({ queryKey: ["videos"] }); // immediate refresh
       setTimeout(() => {
         qc.invalidateQueries({ queryKey: ["videos"] });
         qc.invalidateQueries({ queryKey: ["stats"] });
@@ -142,5 +145,13 @@ export function useInstallTtsProvider() {
   return useMutation({
     mutationFn: (providerId: string) => api.installTtsProvider(providerId),
     onSuccess: () => qc.invalidateQueries({ queryKey: ["tts-providers"] }),
+  });
+}
+
+// ── Music ───────────────────────────────────────────────────────────
+export function useMusicList() {
+  return useQuery({
+    queryKey: ["music-list"],
+    queryFn: api.getMusicList,
   });
 }
