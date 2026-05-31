@@ -174,6 +174,10 @@ export interface FullConfig {
     webhook_url: string;
     upload_media: boolean;
   };
+  scheduler?: {
+    enabled: boolean;
+    time: string;
+  };
   [key: string]: unknown;
 }
 

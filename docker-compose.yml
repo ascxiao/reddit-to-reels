@@ -19,3 +19,7 @@ services:
       - ./backend/src:/app/backend/src
     environment:
       - PYTHONUNBUFFERED=1
+      - TZ=Asia/Manila
+    # To use the host timezone instead, uncomment the line under volumes:
+    # - /etc/timezone:/etc/timezone:ro
+    # - /etc/localtime:/etc/localtime:ro

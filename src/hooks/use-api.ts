@@ -82,11 +82,23 @@ export function useRunPipeline() {
     mutationFn: (params?: { post_id?: string; selected_comments?: number[]; max_comment_chars?: number }) =>
       api.runPipeline(params),
     onSuccess: () => {
+      qc.setQueryData(["pipeline"], (old: any) => {
+        if (!old) return old;
+        return {
+          ...old,
+          is_running: true,
+          error: null,
+        };
+      });
       qc.invalidateQueries({ queryKey: ["pipeline"] });
       qc.invalidateQueries({ queryKey: ["videos"] }); // immediate refresh
       setTimeout(() => {
+        qc.invalidateQueries({ queryKey: ["pipeline"] });
         qc.invalidateQueries({ queryKey: ["videos"] });
         qc.invalidateQueries({ queryKey: ["stats"] });
+      }, 1000);
+      setTimeout(() => {
+        qc.invalidateQueries({ queryKey: ["pipeline"] });
       }, 3000);
     },
   });
@@ -96,7 +108,18 @@ export function useResetPipeline() {
   const qc = useQueryClient();
   return useMutation({
     mutationFn: api.resetPipeline,
-    onSuccess: () => qc.invalidateQueries({ queryKey: ["pipeline"] }),
+    onSuccess: () => {
+      qc.setQueryData(["pipeline"], (old: any) => {
+        if (!old) return old;
+        return {
+          ...old,
+          is_running: false,
+          error: null,
+          steps: old.steps?.map((s: any) => ({ ...s, status: "idle", detail: "" })) ?? [],
+        };
+      });
+      qc.invalidateQueries({ queryKey: ["pipeline"] });
+    },
   });
 }
 
@@ -104,7 +127,23 @@ export function useCancelPipeline() {
   const qc = useQueryClient();
   return useMutation({
     mutationFn: api.cancelPipeline,
-    onSuccess: () => qc.invalidateQueries({ queryKey: ["pipeline"] }),
+    onSuccess: () => {
+      qc.setQueryData(["pipeline"], (old: any) => {
+        if (!old) return old;
+        return {
+          ...old,
+          is_running: false,
+          error: "Cancellation requested...",
+        };
+      });
+      qc.invalidateQueries({ queryKey: ["pipeline"] });
+      setTimeout(() => {
+        qc.invalidateQueries({ queryKey: ["pipeline"] });
+      }, 500);
+      setTimeout(() => {
+        qc.invalidateQueries({ queryKey: ["pipeline"] });
+      }, 1500);
+    },
   });
 }
 
@@ -121,11 +160,23 @@ export function useResumeVideo() {
   return useMutation({
     mutationFn: (post_id: string) => api.resumeVideo(post_id),
     onSuccess: () => {
+      qc.setQueryData(["pipeline"], (old: any) => {
+        if (!old) return old;
+        return {
+          ...old,
+          is_running: true,
+          error: null,
+        };
+      });
       qc.invalidateQueries({ queryKey: ["pipeline"] });
       qc.invalidateQueries({ queryKey: ["videos"] }); // immediate refresh
       setTimeout(() => {
+        qc.invalidateQueries({ queryKey: ["pipeline"] });
         qc.invalidateQueries({ queryKey: ["videos"] });
         qc.invalidateQueries({ queryKey: ["stats"] });
+      }, 1000);
+      setTimeout(() => {
+        qc.invalidateQueries({ queryKey: ["pipeline"] });
       }, 3000);
     },
   });

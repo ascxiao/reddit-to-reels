@@ -46,18 +46,21 @@ export function PipelineStep({ title, description, icon, status, index, isLast, 
       <div className="flex flex-col items-center">
         <div
           className={cn(
-            "flex h-10 w-10 items-center justify-center rounded-xl border transition-all duration-300",
+            "relative flex h-10 w-10 items-center justify-center rounded-xl border transition-all duration-300",
             status === "running" && "border-primary bg-primary/10 glow-primary",
             status === "done" && "border-success bg-success/10",
             status === "error" && "border-destructive bg-destructive/10",
             status === "idle" && "border-border bg-secondary"
           )}
         >
-          {status === "running" ? (
-            <Loader2 className="h-5 w-5 animate-spin text-primary" />
-          ) : (
-            <span className={cn("h-5 w-5", color)}>{icon}</span>
+          {status === "running" && (
+            <span className="absolute -top-1 -right-1 flex h-4.5 w-4.5 items-center justify-center rounded-full bg-primary text-primary-foreground shadow-md border border-background">
+              <Loader2 className="h-2.5 w-2.5 animate-spin" />
+            </span>
           )}
+          <span className={cn("h-5 w-5 flex items-center justify-center", color)}>
+            {icon}
+          </span>
         </div>
         {!isLast && (
           <div

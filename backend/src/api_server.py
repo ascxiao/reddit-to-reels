@@ -13,6 +13,15 @@ License: CC BY-NC 4.0
 import asyncio
 import os
 import sys
+# Ensure standard streams support Unicode (especially on Windows)
+if sys.platform.startswith('win'):
+    try:
+        sys.stdout.reconfigure(encoding='utf-8', errors='replace')
+        sys.stderr.reconfigure(encoding='utf-8', errors='replace')
+    except AttributeError:
+        import codecs
+        sys.stdout = codecs.getwriter('utf-8')(sys.stdout.buffer, 'replace')
+        sys.stderr = codecs.getwriter('utf-8')(sys.stderr.buffer, 'replace')
 import json
 import time
 import shutil
@@ -116,6 +125,10 @@ DEFAULT_CONFIG = {
             "nvidia/llama-3.1-nemotron-70b-instruct", "deepseek-ai/deepseek-r1",
         ],
     },
+    "scheduler": {
+        "enabled": False,
+        "time": "07:00"
+    },
 }
 
 pipeline_state = {
@@ -144,7 +157,7 @@ stats = {
     "total_render_time_s": 0, "total_runs": 0, "successful_runs": 0,
 }
 run_logs: List[str] = []
-
+import logging
 
 def _log(msg: str):
     ts = datetime.now(timezone.utc).strftime("%H:%M:%S")
@@ -153,6 +166,39 @@ def _log(msg: str):
     if len(run_logs) > 500:
         run_logs.pop(0)
     print(entry)
+
+# Redirect tts_engine logs (INFO and above) to the frontend developer dashboard
+class DashboardLogHandler(logging.Handler):
+    def emit(self, record):
+        try:
+            if record.levelno >= logging.INFO:
+                msg = record.getMessage()
+                _log(f"🎙️ [TTS] {msg}")
+        except Exception:
+            self.handleError(record)
+
+# Attach handler to tts_engine
+# Attach handler to tts_engine
+tts_logger = logging.getLogger("tts_engine")
+db_handler = DashboardLogHandler()
+db_handler.setLevel(logging.INFO)
+tts_logger.addHandler(db_handler)
+
+# Redirect reddit_story_maker logs (INFO and above) to the frontend developer dashboard
+class RedditLogHandler(logging.Handler):
+    def emit(self, record):
+        try:
+            if record.levelno >= logging.INFO:
+                msg = record.getMessage()
+                _log(f"📋 [Reddit] {msg}")
+        except Exception:
+            self.handleError(record)
+
+reddit_logger = logging.getLogger("reddit_story_maker")
+reddit_handler = RedditLogHandler()
+reddit_handler.setLevel(logging.INFO)
+reddit_logger.addHandler(reddit_handler)
+
 
 
 def _ensure_config():
@@ -289,12 +335,64 @@ def _load_used_posts() -> List[str]:
     return []
 
 
+async def _scheduler_loop():
+    _log("Daily automated video generator scheduler initialized")
+    while True:
+        try:
+            config = _load_config()
+            sched_cfg = config.get("scheduler", {})
+            if sched_cfg.get("enabled", False):
+                target_time = sched_cfg.get("time", "09:00")
+                now = datetime.now().strftime("%H:%M")
+                if now == target_time:
+                    if not pipeline_state["is_running"]:
+                        _log(f"Scheduler: Daily automated trigger activated at {now}!")
+                        
+                        # Reset steps
+                        for step in pipeline_state["steps"]:
+                            step["status"] = "idle"
+                            step["detail"] = ""
+                            step.pop("sub_steps", None)
+                        
+                        # Skip AI content generation step since this is standard automated Reddit pipeline
+                        _set_step("ai_generate", "done", "Daily automated scheduler — skipped")
+                        pipeline_state["is_running"] = True
+                        pipeline_state["error"] = None
+                        pipeline_state["current_post"] = None
+                        pipeline_state["started_at"] = datetime.now(timezone.utc).isoformat()
+                        pipeline_state["completed_at"] = None
+                        
+                        # Trigger async pipeline task
+                        asyncio.create_task(_run_pipeline_async())
+                    else:
+                        _log("Scheduler: Target time reached, but pipeline is already running. Skipping automated run.")
+                    
+                    # Sleep 61 seconds to guarantee the current minute passes completely
+                    await asyncio.sleep(61)
+            
+            # Check every 60 seconds (as requested by user)
+            await asyncio.sleep(60)
+        except asyncio.CancelledError:
+            _log("Scheduler task stopped")
+            break
+        except Exception as e:
+            _log(f"Scheduler loop error: {e}")
+            await asyncio.sleep(60)
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     _ensure_config()
     _load_videos_from_disk()
     _log("Server started")
+    
+    # Start scheduler loop background task
+    sched_task = asyncio.create_task(_scheduler_loop())
+    
     yield
+    
+    # Clean up task on shutdown
+    sched_task.cancel()
 
 
 # ── App ──────────────────────────────────────────────────────────────
@@ -483,6 +581,11 @@ async def get_post_comments(req: dict = {}):
 
 @app.get("/api/pipeline/status")
 async def pipeline_status():
+    if _cancel_requested:
+        state = pipeline_state.copy()
+        state["is_running"] = False
+        state["error"] = "Cancellation requested..."
+        return state
     return pipeline_state
 
 

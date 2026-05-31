@@ -136,6 +136,8 @@ export default function ConfigPage() {
   const [musicEnabled, setMusicEnabled] = useState(false);
   const [musicFile, setMusicFile] = useState("random");
   const [musicVolume, setMusicVolume] = useState(0.1);
+  const [schedulerEnabled, setSchedulerEnabled] = useState(false);
+  const [schedulerTime, setSchedulerTime] = useState("09:00");
 
   // Output
   const [postsDir, setPostsDir] = useState("posts");
@@ -223,6 +225,10 @@ export default function ConfigPage() {
     setMusicEnabled((v as any).music_enabled ?? false);
     setMusicFile((v as any).music_file ?? "random");
     setMusicVolume((v as any).music_volume ?? 0.1);
+
+    const s = (c as any).scheduler ?? {};
+    setSchedulerEnabled(s.enabled ?? false);
+    setSchedulerTime(s.time ?? "09:00");
 
     const o = c.output ?? {} as FullConfig["output"];
     setPostsDir(o.posts_directory ?? "posts");
@@ -339,6 +345,10 @@ export default function ConfigPage() {
           ollama_url: ollamaUrl,
           ollama_models: ollamaModels,
           nvidia_nim_models: nvidiaNimModels,
+        },
+        scheduler: {
+          enabled: schedulerEnabled,
+          time: schedulerTime,
         },
       },
       {
@@ -1071,6 +1081,33 @@ export default function ConfigPage() {
               <Label className="text-xs text-muted-foreground">Used Posts File</Label>
               <Input value={usedPostsFile} onChange={(e) => setUsedPostsFile(e.target.value)} className="h-8 text-xs bg-secondary border-border font-mono" />
             </div>
+          </Section>
+
+          <Section title="Daily Automation Scheduler" icon={<Sparkles className="h-4 w-4 text-primary" />}>
+            <div className="flex items-center justify-between">
+              <div>
+                <Label className="text-xs font-semibold">Enable Daily Scheduler</Label>
+                <p className="text-[10px] text-muted-foreground mt-0.5">Automated video generation daily</p>
+              </div>
+              <Switch checked={schedulerEnabled} onCheckedChange={setSchedulerEnabled} />
+            </div>
+            
+            {schedulerEnabled && (
+              <div className="space-y-2 pl-3 border-l-2 border-primary/20 ml-1 mt-2">
+                <div className="space-y-1">
+                  <Label className="text-xs text-muted-foreground">Execution Time (Local Time)</Label>
+                  <Input 
+                    type="time" 
+                    value={schedulerTime} 
+                    onChange={(e) => setSchedulerTime(e.target.value)} 
+                    className="h-8 text-xs bg-secondary border-border font-mono w-32"
+                  />
+                  <p className="text-[10px] text-muted-foreground">
+                    Format: HH:MM (e.g., 09:00 for 9 AM). Checked once every minute.
+                  </p>
+                </div>
+              </div>
+            )}
           </Section>
 
           <Section title="Discord Notifications" icon={<Bell className="h-4 w-4 text-accent" />}>

@@ -11,10 +11,45 @@ import requests
 import json
 import os
 import sys
+# Ensure standard streams support Unicode (especially on Windows)
+if sys.platform.startswith('win'):
+    try:
+        sys.stdout.reconfigure(encoding='utf-8', errors='replace')
+        sys.stderr.reconfigure(encoding='utf-8', errors='replace')
+    except AttributeError:
+        import codecs
+        sys.stdout = codecs.getwriter('utf-8')(sys.stdout.buffer, 'replace')
+        sys.stderr = codecs.getwriter('utf-8')(sys.stderr.buffer, 'replace')
 import hashlib
 import time
+import logging
 from typing import Optional, List
 from pathlib import Path
+
+# Setup logging
+logger = logging.getLogger("tts_engine")
+logger.setLevel(logging.DEBUG)
+
+if not logger.handlers:
+    formatter = logging.Formatter('[%(asctime)s] %(levelname)s [%(name)s]: %(message)s')
+    
+    # Console handler (standard output)
+    ch = logging.StreamHandler(sys.stdout)
+    ch.setLevel(logging.INFO)
+    ch.setFormatter(formatter)
+    logger.addHandler(ch)
+    
+    # File handler (debug file in active project)
+    try:
+        log_file = "tts.log"
+        fh = logging.FileHandler(log_file, encoding='utf-8')
+        fh.setLevel(logging.DEBUG)
+        fh.setFormatter(formatter)
+        logger.addHandler(fh)
+    except Exception as e:
+        print(f"⚠️  Could not initialize TTS file logger: {e}")
+
+
 
 
 class StreamlabsTTS:
@@ -171,8 +206,13 @@ class StreamlabsTTS:
         Validates text length and chunks if necessary.
         """
         if not text or not text.strip():
-            print("⚠️  Empty text provided, skipping TTS")
+            logger.warning("Empty text provided, skipping TTS synthesis")
             return None
+
+        # Clean unicode characters that are known to fail cloud TTS APIs
+        text = text.replace("…", "...").replace("—", "-").replace("–", "-")
+        text = text.replace("“", '"').replace("”", '"').replace("‘", "'").replace("’", "'")
+        text = text.replace("\u200b", "").replace("\ufeff", "")
         
         # Generate filename
         if not output_filename:
@@ -182,16 +222,16 @@ class StreamlabsTTS:
         
         # Check if file already exists (cache)
         if os.path.exists(output_path):
-            print(f"✓ Using cached audio: {output_filename}")
+            logger.info(f"✓ Using cached audio: {output_filename}")
             return output_path
 
         # Handle long text by chunking
         if len(text) > self.MAX_TEXT_LENGTH:
-            print(f"ℹ️  Text too long ({len(text)} chars), splitting into chunks...")
+            logger.info(f"Text too long ({len(text)} chars), splitting into chunks...")
             chunks = self.segment_text(text)
             chunk_files = []
             
-            print(f"   Processing {len(chunks)} chunks...")
+            logger.info(f"Processing {len(chunks)} chunks sequentially...")
             
             for i, chunk in enumerate(chunks):
                 # Check cancellation between chunks
@@ -201,7 +241,7 @@ class StreamlabsTTS:
                 chunk_path = self.synthesize(chunk, output_filename=chunk_filename, max_retries=max_retries)
                 
                 if not chunk_path:
-                    print(f"❌ Failed to generate chunk {i+1}/{len(chunks)}")
+                    logger.error(f"❌ Failed to generate chunk {i+1}/{len(chunks)}")
                     return None
                     
                 chunk_files.append(chunk_path)
@@ -220,10 +260,10 @@ class StreamlabsTTS:
                         except:
                             pass
                 
-                print(f"✓ Combined {len(chunks)} chunks into: {output_filename}")
+                logger.info(f"✓ Combined {len(chunks)} chunks into: {output_filename}")
                 return output_path
             except Exception as e:
-                print(f"❌ Error combining chunks: {e}")
+                logger.exception(f"❌ Error combining chunks into {output_filename}: {e}")
                 return None
         
         # Prepare form data (POST request, not GET!)
@@ -231,6 +271,8 @@ class StreamlabsTTS:
             'voice': self.voice,
             'text': text
         }
+        
+        logger.debug(f"Sending Streamlabs TTS request: URL={self.API_URL}, Voice={self.voice}, Text='{text[:60]}...'")
         
         # Retry logic with exponential backoff
         for attempt in range(max_retries):
@@ -242,6 +284,7 @@ class StreamlabsTTS:
                 # Rate limiting delay (skip on first request if it's the first overall)
                 if attempt > 0 or self.delay_between_requests > 0:
                     delay = self.delay_between_requests * (2 ** attempt)  # Exponential backoff
+                    logger.debug(f"Delaying {delay:.2f}s before attempt {attempt + 1}")
                     time.sleep(delay)
                 
                 # Make POST request to Streamlabs API
@@ -251,23 +294,26 @@ class StreamlabsTTS:
                     headers=self.headers,
                     timeout=30
                 )
+                logger.debug(f"Streamlabs HTTP response: status_code={response.status_code}")
                 response.raise_for_status()
                 
                 # Parse JSON response
                 try:
                     result = response.json()
+                    logger.debug(f"Streamlabs API payload: {result}")
                     if not result.get('success'):
-                        print(f"✗ TTS Error: API returned success=false")
+                        logger.error(f"✗ TTS Error: API returned success=False. Payload={result}")
                         if attempt < max_retries - 1:
-                            print(f"  Retrying ({attempt + 2}/{max_retries})...")
+                            logger.info(f"Retrying ({attempt + 2}/{max_retries})...")
                             continue
                         return None
                     
                     speak_url = result.get('speak_url')
                     if not speak_url:
-                        print(f"✗ TTS Error: No speak_url in response")
+                        logger.error(f"✗ TTS Error: No speak_url in response. Payload={result}")
                         return None
                     
+                    logger.debug(f"Downloading TTS audio from URL: {speak_url}")
                     # Download the actual audio file
                     audio_response = requests.get(speak_url, timeout=30)
                     audio_response.raise_for_status()
@@ -276,39 +322,39 @@ class StreamlabsTTS:
                     with open(output_path, 'wb') as f:
                         f.write(audio_response.content)
                     
-                    print(f"✓ Generated TTS: {output_filename} ({self.voice})")
+                    logger.info(f"✓ Generated TTS: {output_filename} ({self.voice})")
                     return output_path
                     
-                except json.JSONDecodeError:
-                    print(f"✗ TTS Error: Invalid JSON response")
+                except json.JSONDecodeError as jde:
+                    logger.error(f"✗ TTS Error: Invalid JSON response: {jde}. Raw body: {response.text[:200]}")
                     if attempt < max_retries - 1:
-                        print(f"  Retrying ({attempt + 2}/{max_retries})...")
+                        logger.info(f"Retrying ({attempt + 2}/{max_retries})...")
                         continue
                     return None
                 
             except requests.exceptions.HTTPError as e:
-                if e.response.status_code == 422:
+                logger.error(f"HTTPError on attempt {attempt+1}: {e}")
+                if e.response is not None:
+                    logger.error(f"Response status: {e.response.status_code}, headers: {e.response.headers}, body: {e.response.text[:500]}")
+                if e.response is not None and e.response.status_code in (422, 429):
                     # Rate limit or validation error - retry with backoff
-                    print(f"DEBUG: 422 Response: {e.response.text}")
                     if attempt < max_retries - 1:
                         wait_time = self.delay_between_requests * (2 ** (attempt + 1))
-                        print(f"✗ Rate limit (422) - waiting {wait_time:.1f}s before retry ({attempt + 2}/{max_retries})...")
+                        logger.warning(f"✗ Rate limit ({e.response.status_code}) - waiting {wait_time:.1f}s before retry ({attempt + 2}/{max_retries})...")
                         time.sleep(wait_time)
                         continue
                     else:
-                        print(f"✗ TTS Error: {e} (max retries reached)")
+                        logger.error(f"✗ TTS Error: {e} (max retries reached)")
                         return None
                 else:
-                    print(f"✗ TTS Error: {e}")
                     return None
                     
             except requests.exceptions.RequestException as e:
-                print(f"✗ TTS Error: {e}")
+                logger.exception(f"✗ TTS RequestException on attempt {attempt+1}: {e}")
                 if attempt < max_retries - 1:
-                    print(f"  Retrying ({attempt + 2}/{max_retries})...")
+                    logger.info(f"Retrying ({attempt + 2}/{max_retries})...")
                     continue
                 return None
-        
         return None
     
     def _generate_silence(self, duration_seconds: int, output_path: str) -> str:
@@ -545,19 +591,25 @@ class LazyPyTikTokTTS:
 
     def synthesize(self, text: str, output_filename: Optional[str] = None, max_retries: int = 3) -> Optional[str]:
         if not text or not text.strip():
+            logger.warning("Empty text provided for TikTok TTS, skipping synthesis")
             return None
+
+        # Clean unicode characters that are known to fail TikTok TTS
+        text = text.replace("…", "...").replace("—", "-").replace("–", "-")
+        text = text.replace("“", '"').replace("”", '"').replace("‘", "'").replace("’", "'")
+        text = text.replace("\u200b", "").replace("\ufeff", "")
 
         if not output_filename:
             output_filename = self._generate_filename(text, self.voice)
         output_path = os.path.join(self.output_dir, output_filename)
 
         if os.path.exists(output_path):
-            print(f"✓ Using cached audio: {output_filename}")
+            logger.info(f"✓ Using cached audio: {output_filename}")
             return output_path
 
         # Handle long text by chunking
         if len(text) > self.MAX_TEXT_LENGTH:
-            print(f"ℹ️  Text too long ({len(text)} chars), splitting into chunks...")
+            logger.info(f"TikTok text too long ({len(text)} chars), splitting into chunks...")
             chunks = self.segment_text(text)
             chunk_files = []
             for i, chunk in enumerate(chunks):
@@ -566,7 +618,7 @@ class LazyPyTikTokTTS:
                 chunk_filename = f"temp_tt_{int(time.time())}_{i}.mp3"
                 chunk_path = self.synthesize(chunk, output_filename=chunk_filename, max_retries=max_retries)
                 if not chunk_path:
-                    print(f"❌ Failed to generate chunk {i+1}/{len(chunks)}")
+                    logger.error(f"❌ Failed to generate TikTok chunk {i+1}/{len(chunks)}")
                     return None
                 chunk_files.append(chunk_path)
                 time.sleep(0.3)
@@ -580,10 +632,10 @@ class LazyPyTikTokTTS:
                             os.remove(cp)
                         except:
                             pass
-                print(f"✓ Combined {len(chunks)} TikTok TTS chunks: {output_filename}")
+                logger.info(f"✓ Combined {len(chunks)} TikTok TTS chunks: {output_filename}")
                 return output_path
             except Exception as e:
-                print(f"❌ Error combining chunks: {e}")
+                logger.exception(f"❌ Error combining TikTok chunks into {output_filename}: {e}")
                 return None
 
         # POST request to LazyPy
@@ -593,31 +645,39 @@ class LazyPyTikTokTTS:
             'text': text,
         }
 
+        logger.debug(f"Sending TikTok TTS (LazyPy) request: URL={self.API_URL}, Voice={self.voice}, Text='{text[:60]}...'")
+
         for attempt in range(max_retries):
             if self.cancel_check:
                 self.cancel_check()
             try:
                 if attempt > 0:
-                    time.sleep(self.delay_between_requests * (2 ** attempt))
+                    delay = self.delay_between_requests * (2 ** attempt)
+                    logger.debug(f"Delaying {delay:.2f}s before TikTok attempt {attempt + 1}")
+                    time.sleep(delay)
 
                 response = requests.post(
                     self.API_URL, data=data, headers=self.headers, timeout=30
                 )
+                logger.debug(f"TikTok HTTP response: status_code={response.status_code}")
                 response.raise_for_status()
 
                 result = response.json()
+                logger.debug(f"TikTok API payload: {result}")
                 if not result.get('success'):
                     err = result.get('error_msg', 'Unknown error')
-                    print(f"✗ TikTok TTS Error: {err}")
+                    logger.error(f"✗ TikTok TTS Error: {err}. Full response={result}")
                     if attempt < max_retries - 1:
+                        logger.info(f"Retrying ({attempt + 2}/{max_retries})...")
                         continue
                     return None
 
                 audio_url = result.get('audio_url')
                 if not audio_url:
-                    print("✗ TikTok TTS: No audio_url in response")
+                    logger.error(f"✗ TikTok TTS: No audio_url in response. Full response={result}")
                     return None
 
+                logger.debug(f"Downloading TikTok audio from URL: {audio_url}")
                 # Download audio
                 audio_resp = requests.get(audio_url, timeout=30)
                 audio_resp.raise_for_status()
@@ -625,12 +685,13 @@ class LazyPyTikTokTTS:
                 with open(output_path, 'wb') as f:
                     f.write(audio_resp.content)
 
-                print(f"✓ TikTok TTS: {output_filename} ({self.voice})")
+                logger.info(f"✓ TikTok TTS: {output_filename} ({self.voice})")
                 return output_path
 
             except requests.exceptions.RequestException as e:
-                print(f"✗ TikTok TTS Error: {e}")
+                logger.exception(f"✗ TikTok TTS RequestException on attempt {attempt+1}: {e}")
                 if attempt < max_retries - 1:
+                    logger.info(f"Retrying ({attempt + 2}/{max_retries})...")
                     continue
                 return None
 

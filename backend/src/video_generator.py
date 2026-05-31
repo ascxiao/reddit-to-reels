@@ -40,6 +40,9 @@ if getattr(sys, "frozen", False):
     PROJECT_ROOT = os.path.dirname(sys.executable)
 else:
     PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    # If resolved inside backend/ directory, go up one more level to repository root
+    if os.path.basename(PROJECT_ROOT) == "backend":
+        PROJECT_ROOT = os.path.dirname(PROJECT_ROOT)
 
 class VideoGenerator:
     """
@@ -71,12 +74,25 @@ class VideoGenerator:
             self.aspect_ratio = 16/9
             
         self.backgrounds_dir = os.path.join(PROJECT_ROOT, "backgrounds")
-        if not os.path.exists(self.backgrounds_dir):
-            os.makedirs(self.backgrounds_dir)
+        # Fall back to backend/backgrounds if running in Docker/volumes where it's mounted there
+        if not os.path.exists(self.backgrounds_dir) or not any(f.lower().endswith(('.mp4', '.mov', '.avi')) for f in os.listdir(self.backgrounds_dir) if os.path.isfile(os.path.join(self.backgrounds_dir, f))):
+            backend_bg = os.path.join(PROJECT_ROOT, "backend", "backgrounds")
+            if os.path.exists(backend_bg) and any(f.lower().endswith(('.mp4', '.mov', '.avi')) for f in os.listdir(backend_bg) if os.path.isfile(os.path.join(backend_bg, f))):
+                self.backgrounds_dir = backend_bg
+            else:
+                os.makedirs(self.backgrounds_dir, exist_ok=True)
+        else:
+            os.makedirs(self.backgrounds_dir, exist_ok=True)
             
         self.music_dir = os.path.join(PROJECT_ROOT, "music")
-        if not os.path.exists(self.music_dir):
-            os.makedirs(self.music_dir)
+        if not os.path.exists(self.music_dir) or not any(f.lower().endswith(('.mp3', '.wav', '.m4a', '.aac')) for f in os.listdir(self.music_dir) if os.path.isfile(os.path.join(self.music_dir, f))):
+            backend_music = os.path.join(PROJECT_ROOT, "backend", "music")
+            if os.path.exists(backend_music) and any(f.lower().endswith(('.mp3', '.wav', '.m4a', '.aac')) for f in os.listdir(backend_music) if os.path.isfile(os.path.join(backend_music, f))):
+                self.music_dir = backend_music
+            else:
+                os.makedirs(self.music_dir, exist_ok=True)
+        else:
+            os.makedirs(self.music_dir, exist_ok=True)
             
     def _load_font(self, font_name: str, size: int):
         """
@@ -364,7 +380,8 @@ class VideoGenerator:
                 segment['is_title'] = True
                 
             if segment.get('is_title'):
-                segment['thumbnail_path'] = thumbnail_path
+                # Only display the full-frame thumbnail card at the start of Part 1
+                segment['thumbnail_path'] = thumbnail_path if part_number == 1 else None
  
         # 1. Prepare Audio
         audio_clips = []
@@ -408,7 +425,7 @@ class VideoGenerator:
                     music_clip = music_clip.volumex(music_volume)
                     final_audio = CompositeAudioClip([final_audio, music_clip])
             except Exception as e:
-                print(f"⚠️ Error mixing background music: {e}")ail_duration > 0) else 0)
+                print(f"⚠️ Error mixing background music: {e}")
         
         # 2. Prepare Background
         background_clip = self.get_random_background(total_duration)
@@ -460,15 +477,16 @@ class VideoGenerator:
                 current_time += segment_duration
                 continue
 
-            # Regular segment gets rapid 1-2 words popup
+            # Regular segment gets rapid popup (grouped to 3-4 words for optimal readability)
             words = segment['text'].split()
             word_groups = []
-            for w_idx in range(0, len(words), 2):
-                word_groups.append(" ".join(words[w_idx:w_idx+2]))
-                
-            if not word_groups:
+            group_size = 3 if len(words) > 4 else len(words)
+            if group_size == 0:
                 current_time += segment_duration
                 continue
+                
+            for w_idx in range(0, len(words), group_size):
+                word_groups.append(" ".join(words[w_idx:w_idx+group_size]))
                 
             # Distribute segment duration proportionally to length of word groups
             total_chars = sum(len(g) for g in word_groups)
@@ -1159,7 +1177,7 @@ class VideoGenerator:
             cmd = [
                 ffmpeg_exe, '-y',
                 '-i', temp_bg_path,
-                '-f', 'concat', '-safe', '0', '-i', concat_path,
+                '-f', 'concat', '-safe', '0', '-pix_fmt', 'rgba', '-i', concat_path,
                 '-i', temp_audio_path,
                 '-filter_complex', '[0:v][1:v]overlay=0:0[outv]',
                 '-map', '[outv]', '-map', '2:a',

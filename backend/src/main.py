@@ -14,6 +14,15 @@ License: CC BY-NC 4.0
 """
 import os
 import sys
+# Ensure standard streams support Unicode (especially on Windows)
+if sys.platform.startswith('win'):
+    try:
+        sys.stdout.reconfigure(encoding='utf-8', errors='replace')
+        sys.stderr.reconfigure(encoding='utf-8', errors='replace')
+    except AttributeError:
+        import codecs
+        sys.stdout = codecs.getwriter('utf-8')(sys.stdout.buffer, 'replace')
+        sys.stderr = codecs.getwriter('utf-8')(sys.stderr.buffer, 'replace')
 import json
 import argparse
 import time
